@@ -22,7 +22,8 @@ use std::pin::Pin;
 use std::sync::LazyLock;
 use std::{collections::BTreeMap, sync::Arc};
 use ui::{
-    ButtonLike, ConfiguredApiCard, ElevationIndex, List, ListBulletItem, Tooltip, prelude::*,
+    ButtonLike, Checkbox, ConfiguredApiCard, ElevationIndex, List, ListBulletItem, Tooltip,
+    prelude::*,
 };
 use ui_input::InputField;
 
@@ -43,6 +44,7 @@ static API_KEY_ENV_VAR: LazyLock<EnvVar> = env_var!(API_KEY_ENV_VAR_NAME);
 pub struct LmStudioSettings {
     pub api_url: String,
     pub available_models: Vec<AvailableModel>,
+    pub parallel_tool_calls: bool,
 }
 
 pub struct LmStudioLanguageModelProvider {
@@ -87,7 +89,7 @@ impl State {
                 .into_iter()
                 .filter(|model| model.r#type != ModelType::Embeddings)
                 .map(|model| {
-                    lmstudio::Model::new(
+                    let mut m = lmstudio::Model::new(
                         &model.id,
                         None,
                         model
@@ -95,7 +97,11 @@ impl State {
                             .or_else(|| model.max_context_length),
                         model.capabilities.supports_tool_calls(),
                         model.capabilities.supports_images() || model.r#type == ModelType::Vlm,
-                    )
+                    );
+                    // LM Studio does not expose whether a model supports parallel
+                    // tool calls via the API, so we default to false here.
+                    m.supports_parallel_tool_calls = false;
+                    m
                 })
                 .collect();
 
@@ -252,6 +258,7 @@ impl LanguageModelProvider for LmStudioLanguageModelProvider {
                     max_tokens: model.max_tokens,
                     supports_tool_calls: model.supports_tool_calls,
                     supports_images: model.supports_images,
+                    supports_parallel_tool_calls: model.supports_parallel_tool_calls,
                 },
             );
         }
@@ -306,6 +313,7 @@ impl LmStudioLanguageModel {
     fn to_lmstudio_request(
         &self,
         request: LanguageModelRequest,
+        parallel_tool_calls_enabled: bool,
     ) -> lmstudio::ChatCompletionRequest {
         let mut messages = Vec::new();
 
@@ -380,6 +388,20 @@ impl LmStudioLanguageModel {
             }
         }
 
+        let tools: Vec<lmstudio::ToolDefinition> = request
+            .tools
+            .into_iter()
+            .map(|tool| lmstudio::ToolDefinition::Function {
+                function: lmstudio::FunctionDefinition {
+                    name: tool.name,
+                    description: Some(tool.description),
+                    parameters: Some(tool.input_schema),
+                },
+            })
+            .collect();
+
+        let has_tools = !tools.is_empty();
+
         lmstudio::ChatCompletionRequest {
             model: self.model.name.clone(),
             messages,
@@ -390,22 +412,17 @@ impl LmStudioLanguageModel {
             // For example Qwen3 is recommended to be used with 0.7 temperature.
             // It would be a bad UX to silently override these settings from Zed, so we pass no temperature as a default.
             temperature: request.temperature.or(None),
-            tools: request
-                .tools
-                .into_iter()
-                .map(|tool| lmstudio::ToolDefinition::Function {
-                    function: lmstudio::FunctionDefinition {
-                        name: tool.name,
-                        description: Some(tool.description),
-                        parameters: Some(tool.input_schema),
-                    },
-                })
-                .collect(),
+            tools,
             tool_choice: request.tool_choice.map(|choice| match choice {
                 LanguageModelToolChoice::Auto => lmstudio::ToolChoice::Auto,
                 LanguageModelToolChoice::Any => lmstudio::ToolChoice::Required,
                 LanguageModelToolChoice::None => lmstudio::ToolChoice::None,
             }),
+            parallel_tool_calls: if parallel_tool_calls_enabled && has_tools {
+                Some(true)
+            } else {
+                None
+            },
         }
     }
 
@@ -507,7 +524,12 @@ impl LanguageModel for LmStudioLanguageModel {
             LanguageModelCompletionError,
         >,
     > {
-        let request = self.to_lmstudio_request(request);
+        let parallel_tool_calls_enabled = self.state.read_with(cx, |_, cx| {
+            AllLanguageModelSettings::get_global(cx)
+                .lmstudio
+                .parallel_tool_calls
+        });
+        let request = self.to_lmstudio_request(request, parallel_tool_calls_enabled);
         let completions = self.stream_completion(request, cx);
         async move {
             let mapper = LmStudioEventMapper::new();
@@ -757,6 +779,18 @@ impl ConfigurationView {
         cx.notify();
     }
 
+    fn set_parallel_tool_calls(&self, enabled: bool, cx: &mut Context<Self>) {
+        let fs = <dyn Fs>::global(cx);
+        update_settings_file(fs, cx, move |settings, _| {
+            settings
+                .language_models
+                .get_or_insert_default()
+                .lmstudio
+                .get_or_insert_default()
+                .parallel_tool_calls = Some(enabled);
+        });
+    }
+
     fn save_api_url(&self, cx: &mut Context<Self>) {
         let api_url = self.api_url_editor.read(cx).text(cx).trim().to_string();
         let current_url = LmStudioLanguageModelProvider::api_url(cx);
@@ -797,6 +831,45 @@ impl ConfigurationView {
             }
         });
         cx.notify();
+    }
+
+    fn render_parallel_tool_calls_toggle(&self, cx: &Context<Self>) -> impl IntoElement {
+        let parallel_tool_calls_enabled = AllLanguageModelSettings::get_global(cx)
+            .lmstudio
+            .parallel_tool_calls;
+
+        h_flex()
+            .gap_2()
+            .child(
+                Checkbox::new(
+                    "lmstudio-parallel-tool-calls",
+                    if parallel_tool_calls_enabled {
+                        ui::ToggleState::Selected
+                    } else {
+                        ui::ToggleState::Unselected
+                    },
+                )
+                .on_click(cx.listener(
+                    move |this, checked: &ui::ToggleState, _window, cx| {
+                        let enabled = matches!(checked, ui::ToggleState::Selected);
+                        this.set_parallel_tool_calls(enabled, cx);
+                    },
+                )),
+            )
+            .child(Label::new("Enable parallel tool calls"))
+            .child(
+                IconButton::new("lmstudio-parallel-tool-calls-info", IconName::Info)
+                    .icon_size(IconSize::Small)
+                    .icon_color(Color::Muted)
+                    .shape(ui::IconButtonShape::Square)
+                    .style(ButtonStyle::Transparent)
+                    .tooltip(Tooltip::text(
+                        "When enabled, sends parallel_tool_calls: true, allowing the model to \
+                         return multiple tool calls in a single turn. Only enable this if your \
+                         LM Studio version supports the parallel_tool_calls parameter.",
+                    ))
+                    .into_any_element(),
+            )
     }
 
     fn render_api_url_editor(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -904,6 +977,7 @@ impl Render for ConfigurationView {
             )
             .child(self.render_api_url_editor(cx))
             .child(self.render_api_key_editor(cx))
+            .child(self.render_parallel_tool_calls_toggle(cx))
             .child(
                 h_flex()
                     .w_full()

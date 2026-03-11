@@ -49,6 +49,7 @@ pub struct Model {
     pub max_tokens: u64,
     pub supports_tool_calls: bool,
     pub supports_images: bool,
+    pub supports_parallel_tool_calls: bool,
 }
 
 impl Model {
@@ -65,6 +66,7 @@ impl Model {
             max_tokens: max_tokens.unwrap_or(2048),
             supports_tool_calls,
             supports_images,
+            supports_parallel_tool_calls: false,
         }
     }
 
@@ -82,6 +84,10 @@ impl Model {
 
     pub fn supports_tool_calls(&self) -> bool {
         self.supports_tool_calls
+    }
+
+    pub fn supports_parallel_tool_calls(&self) -> bool {
+        self.supports_parallel_tool_calls
     }
 }
 
@@ -220,6 +226,8 @@ pub struct ChatCompletionRequest {
     pub tools: Vec<ToolDefinition>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

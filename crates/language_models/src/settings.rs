@@ -74,6 +74,7 @@ impl settings::Settings for AllLanguageModelSettings {
             lmstudio: LmStudioSettings {
                 api_url: lmstudio.api_url.unwrap(),
                 available_models: lmstudio.available_models.unwrap_or_default(),
+                parallel_tool_calls: lmstudio.parallel_tool_calls.unwrap_or(false),
             },
             mistral: MistralSettings {
                 api_url: mistral.api_url.unwrap(),

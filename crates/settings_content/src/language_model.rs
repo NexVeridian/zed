@@ -150,6 +150,7 @@ pub struct LmStudioSettingsContent {
     pub api_url: Option<String>,
     pub api_key: Option<String>,
     pub available_models: Option<Vec<LmStudioAvailableModel>>,
+    pub parallel_tool_calls: Option<bool>,
 }
 
 #[with_fallible_options]
@@ -160,6 +161,8 @@ pub struct LmStudioAvailableModel {
     pub max_tokens: u64,
     pub supports_tool_calls: bool,
     pub supports_images: bool,
+    #[serde(default)]
+    pub supports_parallel_tool_calls: bool,
 }
 
 #[with_fallible_options]
